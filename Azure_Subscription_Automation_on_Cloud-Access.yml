@@ -1,0 +1,99 @@
+
+#Ansible Playbook to automate the registration for multiple Azure subscriptions on the RH Cloud Access program.
+# 
+# This playbook was created based on the Red Hat solution: https://access.redhat.com/solutions/6964853
+#
+# HOW TO USE:
+# 
+# First, change the azure account in Azure_Account variables and insert the Azure ID for the subscription and a name.
+#
+# Run the playbook with the rh_api_token ansible-playbook -e "rh_api_token=TOKEN_HERE" playbook.yml
+#
+# The rh_api_token can generated in: https://access.redhat.com/management/api 
+#
+---
+- name: Enable Azure Subscriptions and Gold Image Access for Red Hat Cloud Access
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    rh_api_token: ""
+
+    # Replace these placeholder UUIDs with your actual 36-character Azure Subscription IDs
+    azure_accounts:
+      - id: "a2b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+        nickname: "prod account"
+
+    gold_images:
+      - "rhel-byos"
+
+  tasks:
+    - name: Validate offline API token is provided
+      ansible.builtin.assert:
+        that:
+          - rh_api_token | length > 0
+        fail_msg: "Please provide a valid Red Hat offline token using -e 'rh_api_token=<token>'."
+
+    - name: Exchange offline token for a temporary access token
+      ansible.builtin.uri:
+        url: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: "refresh_token"
+          client_id: "rhsm-api"
+          refresh_token: "{{ rh_api_token }}"
+        status_code: [200]
+      register: token_exchange
+
+    - name: Set access token fact
+      ansible.builtin.set_fact:
+        access_token: "{{ token_exchange.json.access_token }}"
+
+    - name: Enable Azure subscriptions for Red Hat Cloud Access
+      ansible.builtin.uri:
+        url: https://api.access.redhat.com/management/v1/cloud_access_providers/MSAZ/accounts
+        method: POST
+        headers:
+          Authorization: "Bearer {{ access_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ azure_accounts }}"
+        status_code: [200, 201, 202, 204]
+      register: enable_accounts_res
+
+    - name: Display account registration status
+      ansible.builtin.debug:
+        msg: "Accounts enablement returned HTTP status {{ enable_accounts_res.status }}"
+
+    - name: Request Red Hat Gold Image access for Azure subscriptions
+      ansible.builtin.uri:
+        url: https://api.access.redhat.com/management/v1/cloud_access_providers/MSAZ/goldimage
+        method: POST
+        headers:
+          Authorization: "Bearer {{ access_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          images: "{{ gold_images }}"
+          accounts: "{{ azure_accounts | map(attribute='id') | list }}"
+        status_code: [200, 201, 202, 204]
+      register: gold_image_res
+
+    - name: Display Gold Image request status
+      ansible.builtin.debug:
+        msg: "Gold Image request returned HTTP status {{ gold_image_res.status }}"
+
+    - name: Fetch full list of enabled Red Hat products and Azure subscriptions
+      ansible.builtin.uri:
+        url: https://api.access.redhat.com/management/v1/cloud_access_providers/enabled
+        method: GET
+        headers:
+          Authorization: "Bearer {{ access_token }}"
+        status_code: [200]
+      register: enabled_providers_res
+
+    - name: Display full list of enabled Red Hat Cloud Access providers
+      ansible.builtin.debug:
+        var: enabled_providers_res.json
